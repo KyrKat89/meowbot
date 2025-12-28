@@ -300,3 +300,13 @@ client.on("interactionCreate", async i => {
 
 /* ================= LOGIN ================= */
 client.login(TOKEN);
+// ---- Dummy HTTP server for Render Free ----
+const http = require("http");
+
+const PORT = process.env.PORT || 3000;
+http.createServer((_, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("Bot is running");
+}).listen(PORT, () => {
+  console.log(`🌐 HTTP server listening on port ${PORT}`);
+});
