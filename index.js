@@ -9,43 +9,45 @@ const {
 const fs = require("fs");
 const path = require("path");
 
-const TOKEN = process.env.BOT_TOKEN;
+/* ================= ENV ================= */
+const TOKEN = process.env.DISCORD_TOKEN; // ✅ FIXED
+if (!TOKEN) {
+  console.error("❌ DISCORD_TOKEN is missing!");
+  process.exit(1);
+}
 
-// You (bot owner)
 const OWNER_ID = "1164912728087986277";
-
-// Your support server (for opt-in bonus slots)
 const SUPPORT_GUILD_ID = process.env.SUPPORT_GUILD_ID || "1443129460390887454";
-
-// Invite link you want to show when pool is full
 const SUPPORT_INVITE = "https://discord.gg/kphZKb3uBP";
 
-// -------- Persistence files --------
+/* ================= FILES ================= */
 const SETTINGS_FILE = path.join(__dirname, "guildSettings.json");
 const SUPPORTERS_FILE = path.join(__dirname, "supporters.json");
 
-// -------- Defaults --------
+/* ================= DEFAULTS ================= */
+const BASE_SLOTS = 5;
+
 function defaultGuildSettings() {
   return {
     enabled: true,
     interval: 10,
-    customMessage: "meow 😺",      // fallback if pool empty
-    messagePool: ["meow 😺"],      // random pool
-    counter: 0,                   // per-guild counter
+    customMessage: "meow 😺",
+    messagePool: ["meow 😺"],
+    counter: 0,
   };
 }
 
-// default base slots
-const BASE_SLOTS = 5;
+/* ================= STORES ================= */
+const settingsByGuild = new Map();
+let supportersByGuild = {};
 
-// -------- Stores --------
-const settingsByGuild = new Map();         // guildId -> settings
-let supportersByGuild = {};                // guildId -> { userId: true, ... }  (opt-in)
-
-// -------- Load/Save helpers --------
+/* ================= FS HELPERS ================= */
 function safeReadJSON(file, fallback) {
   try {
-    if (!fs.existsSync(file)) return fallback;
+    if (!fs.existsSync(file)) {
+      fs.writeFileSync(file, JSON.stringify(fallback, null, 2));
+      return fallback;
+    }
     return JSON.parse(fs.readFileSync(file, "utf8"));
   } catch (e) {
     console.error(`Failed reading ${file}:`, e);
@@ -72,7 +74,6 @@ function loadAll() {
         : defaultGuildSettings().messagePool,
     });
   }
-
   supportersByGuild = safeReadJSON(SUPPORTERS_FILE, {});
 }
 
@@ -80,8 +81,7 @@ let saveTimer = null;
 function saveAllSoon() {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    const obj = Object.fromEntries(settingsByGuild.entries());
-    safeWriteJSON(SETTINGS_FILE, obj);
+    safeWriteJSON(SETTINGS_FILE, Object.fromEntries(settingsByGuild.entries()));
     safeWriteJSON(SUPPORTERS_FILE, supportersByGuild);
   }, 300);
 }
@@ -94,51 +94,43 @@ function getGuildSettings(guildId) {
   return settingsByGuild.get(guildId);
 }
 
-// -------- Slot calculation (safe opt-in model) --------
+/* ================= SLOTS ================= */
 function getBonusSlots(guildId) {
-  const supporters = supportersByGuild[guildId];
-  if (!supporters) return 0;
-  return Object.keys(supporters).length;
+  return supportersByGuild[guildId]
+    ? Object.keys(supportersByGuild[guildId]).length
+    : 0;
 }
-
 function getMaxSlotsForGuild(guildId) {
   return BASE_SLOTS + getBonusSlots(guildId);
 }
 
-// -------- Permission check --------
+/* ================= PERMS ================= */
 function isStaff(interaction) {
-  // Staff = Manage Guild OR Administrator
   const perms = interaction.memberPermissions;
-  if (!perms) return false;
-  return perms.has(PermissionFlagsBits.ManageGuild) || perms.has(PermissionFlagsBits.Administrator);
+  return perms?.has(PermissionFlagsBits.ManageGuild) ||
+         perms?.has(PermissionFlagsBits.Administrator);
 }
 
-// -------- Messaging helpers --------
-function pickRandom(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
+/* ================= HELPERS ================= */
+const pickRandom = arr => arr[Math.floor(Math.random() * arr.length)];
 
 async function findSpeakableChannel(guild) {
-  // Prefer system channel
   try {
     if (guild.systemChannelId) {
       const ch = await guild.channels.fetch(guild.systemChannelId);
-      if (ch && ch.isTextBased()) return ch;
+      if (ch?.isTextBased()) return ch;
     }
-  } catch (_) {}
+  } catch {}
 
-  // Fallback: first text-based channel where bot can send
-  const channels = await guild.channels.fetch();
   const me = guild.members.me;
-  const candidates = channels
-    .filter(ch => ch && ch.isTextBased())
-    .sort((a, b) => (a.rawPosition ?? 0) - (b.rawPosition ?? 0));
+  const channels = await guild.channels.fetch();
 
-  for (const ch of candidates.values()) {
-    try {
-      const perms = me ? ch.permissionsFor(me) : null;
-      if (perms?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])) return ch;
-    } catch (_) {}
+  for (const ch of channels.values()) {
+    if (!ch.isTextBased()) continue;
+    const perms = ch.permissionsFor(me);
+    if (perms?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])) {
+      return ch;
+    }
   }
   return null;
 }
@@ -146,10 +138,10 @@ async function findSpeakableChannel(guild) {
 async function sendWelcomeMessage(guild) {
   const msg =
     `👋 meow! Thanks for inviting me 😺\n` +
-    `• Set frequency: **/interval**\n` +
-    `• Add random messages: **/pooladd**\n` +
-    `• List messages: **/poollist**\n` +
-    `• Default pool slots: **${BASE_SLOTS}** (bonus slots via supporters)\n` +
+    `• /interval — set frequency\n` +
+    `• /pooladd — add random messages\n` +
+    `• /poollist — view pool\n` +
+    `Slots: ${BASE_SLOTS} + supporter bonuses\n` +
     `Support server: ${SUPPORT_INVITE}`;
 
   try {
@@ -160,7 +152,7 @@ async function sendWelcomeMessage(guild) {
   }
 }
 
-// -------- Discord client --------
+/* ================= CLIENT ================= */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -169,257 +161,165 @@ const client = new Client({
   ],
 });
 
-// -------- Slash Commands --------
+/* ================= SLASH COMMANDS ================= */
 const commands = [
-  new SlashCommandBuilder()
-    .setName("interval")
-    .setDescription("Set how many messages until bot responds (this server only).")
-    .addIntegerOption(opt =>
-      opt.setName("amount").setDescription("Number of messages").setRequired(true)
-    ),
-
-  new SlashCommandBuilder().setName("enable").setDescription("Enable auto mode (this server only)."),
-  new SlashCommandBuilder().setName("disable").setDescription("Disable auto mode (this server only)."),
-
-  new SlashCommandBuilder()
-    .setName("edit")
-    .setDescription("Change the fallback message (this server only).")
-    .addStringOption(opt =>
-      opt.setName("text").setDescription("The message to send").setRequired(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName("pooladd")
-    .setDescription("Add a message to the random pool (this server only).")
-    .addStringOption(opt =>
-      opt.setName("text").setDescription("Message to add").setRequired(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName("poolremove")
-    .setDescription("Remove a message from the pool by number (see /poollist).")
-    .addIntegerOption(opt =>
-      opt.setName("index").setDescription("Message number to remove (1, 2, 3...)").setRequired(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName("poollist")
-    .setDescription("Show the current random message pool + slots (this server only)."),
-
-  new SlashCommandBuilder()
-    .setName("poolclear")
-    .setDescription("Clear the random message pool (this server only)."),
-
-  // Opt-in supporters system (safe bonus slots)
-  new SlashCommandBuilder()
-    .setName("supportadd")
-    .setDescription("Support THIS server (+1 slot) if you are also in the support server.")
-    .setDMPermission(false),
-
-  new SlashCommandBuilder()
-    .setName("supportremove")
-    .setDescription("Remove your support from THIS server (-1 slot).")
-    .setDMPermission(false),
-
+  new SlashCommandBuilder().setName("interval").setDescription("Set message interval")
+    .addIntegerOption(o => o.setName("amount").setRequired(true)),
+  new SlashCommandBuilder().setName("enable").setDescription("Enable auto mode"),
+  new SlashCommandBuilder().setName("disable").setDescription("Disable auto mode"),
+  new SlashCommandBuilder().setName("edit").setDescription("Edit fallback message")
+    .addStringOption(o => o.setName("text").setRequired(true)),
+  new SlashCommandBuilder().setName("pooladd").setDescription("Add pool message")
+    .addStringOption(o => o.setName("text").setRequired(true)),
+  new SlashCommandBuilder().setName("poolremove").setDescription("Remove pool message")
+    .addIntegerOption(o => o.setName("index").setRequired(true)),
+  new SlashCommandBuilder().setName("poollist").setDescription("List pool"),
+  new SlashCommandBuilder().setName("poolclear").setDescription("Clear pool"),
+  new SlashCommandBuilder().setName("supportadd").setDescription("Add support"),
+  new SlashCommandBuilder().setName("supportremove").setDescription("Remove support"),
 ].map(c => c.toJSON());
 
-// -------- Register commands --------
+/* ================= READY ================= */
 client.once("ready", async () => {
   loadAll();
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
-
   try {
-    // Global registration (may take time to appear)
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-    console.log("✅ Global slash commands registered.");
-  } catch (err) {
-    console.error("❌ Command registration error:", err);
+    console.log("✅ Slash commands registered");
+  } catch (e) {
+    console.error("❌ Slash command error:", e);
   }
 
-  console.log(`Logged in as ${client.user.tag}`);
+  console.log(`🤖 Logged in as ${client.user.tag}`);
 });
 
-// -------- When bot joins a new server --------
-client.on("guildCreate", async (guild) => {
-  getGuildSettings(guild.id);
-  await sendWelcomeMessage(guild);
-});
+/* ================= GUILD JOIN ================= */
+client.on("guildCreate", sendWelcomeMessage);
 
-// -------- Auto message counter (per server) --------
+/* ================= MESSAGE HANDLER ================= */
 client.on("messageCreate", async (msg) => {
-  if (msg.author.bot) return;
+  if (msg.author.bot || !msg.guild) return;
 
-  // Global announcement feature (owner-only)
   if (msg.author.id === OWNER_ID && msg.content.startsWith("..meowbot globalmessage ")) {
-    const text = msg.content.slice("..meowbot globalmessage ".length).trim();
+    const text = msg.content.slice(26).trim();
     if (!text) return;
 
     let sent = 0;
-    let failed = 0;
-
     for (const guild of client.guilds.cache.values()) {
       try {
         const ch = await findSpeakableChannel(guild);
         if (ch) {
           await ch.send(text);
           sent++;
-          // small delay to reduce rate-limit risk
-          await new Promise(r => setTimeout(r, 1200));
-        } else {
-          failed++;
+          await new Promise(r => setTimeout(r, 1800));
         }
-      } catch (e) {
-        failed++;
-      }
+      } catch {}
     }
-
-    return msg.reply(`✅ Broadcast done. Sent: **${sent}**, failed/no channel: **${failed}**`);
+    return msg.reply(`✅ Broadcast sent to ${sent} servers`);
   }
-
-  if (!msg.guild) return;
 
   const s = getGuildSettings(msg.guild.id);
   if (!s.enabled) return;
 
   s.counter++;
-
   if (s.counter >= s.interval) {
-    const toSend = s.messagePool.length > 0 ? pickRandom(s.messagePool) : s.customMessage;
-    await msg.channel.send(toSend);
     s.counter = 0;
     saveAllSoon();
+
+    if (msg.channel.permissionsFor(msg.guild.members.me)?.has("SendMessages")) {
+      const text = s.messagePool.length
+        ? pickRandom(s.messagePool)
+        : s.customMessage;
+      await msg.channel.send(text);
+    }
   }
 });
 
-// -------- Slash command handler --------
+/* ================= INTERACTIONS ================= */
 client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-  if (!interaction.guildId) {
-    return interaction.reply({ content: "Use these commands in a server (not in DMs).", ephemeral: true });
-  }
+  if (!interaction.isChatInputCommand() || !interaction.guildId) return;
 
   const guildId = interaction.guildId;
   const s = getGuildSettings(guildId);
   const name = interaction.commandName;
 
-  // Staff-only management commands
   const staffOnly = new Set(["interval", "enable", "disable", "edit", "pooladd", "poolremove", "poolclear"]);
   if (staffOnly.has(name) && !isStaff(interaction)) {
-    return interaction.reply({ content: "❌ Only server staff can use this command.", ephemeral: true });
+    return interaction.reply({ content: "❌ Staff only", ephemeral: true });
   }
 
   if (name === "interval") {
-    const amount = interaction.options.getInteger("amount");
-    s.interval = Math.max(1, amount);
+    s.interval = Math.max(1, interaction.options.getInteger("amount"));
     s.counter = 0;
     saveAllSoon();
-    return interaction.reply(`✔ Interval for this server set to **${s.interval}** messages.`);
+    return interaction.reply(`✔ Interval set to ${s.interval}`);
   }
 
-  if (name === "enable") {
-    s.enabled = true;
-    saveAllSoon();
-    return interaction.reply("✔ Auto mode **ENABLED** for this server 😺");
-  }
-
-  if (name === "disable") {
-    s.enabled = false;
-    saveAllSoon();
-    return interaction.reply("❌ Auto mode **DISABLED** for this server");
-  }
+  if (name === "enable") { s.enabled = true; saveAllSoon(); return interaction.reply("Enabled 😺"); }
+  if (name === "disable") { s.enabled = false; saveAllSoon(); return interaction.reply("Disabled"); }
 
   if (name === "edit") {
-    const text = interaction.options.getString("text");
-    s.customMessage = text;
+    s.customMessage = interaction.options.getString("text");
     saveAllSoon();
-    return interaction.reply(`✔ Fallback message updated for this server:\n**${s.customMessage}**`);
+    return interaction.reply("✔ Updated");
   }
 
   if (name === "pooladd") {
-    const text = interaction.options.getString("text");
-
-    const maxSlots = getMaxSlotsForGuild(guildId);
-    if (s.messagePool.length >= maxSlots) {
-      return interaction.reply(
-        `❌ This server hit the max pool size (**${maxSlots}**).\n` +
-        `Join the support server to unlock more slots: ${SUPPORT_INVITE}`
-      );
+    const max = getMaxSlotsForGuild(guildId);
+    if (s.messagePool.length >= max) {
+      return interaction.reply(`❌ Pool full (${max}). Join: ${SUPPORT_INVITE}`);
     }
-
-    s.messagePool.push(text);
+    s.messagePool.push(interaction.options.getString("text"));
     saveAllSoon();
-    return interaction.reply(`✔ Added to this server pool (#${s.messagePool.length}/${maxSlots}):\n**${text}**`);
+    return interaction.reply("✔ Added");
   }
 
   if (name === "poolremove") {
-    const index = interaction.options.getInteger("index");
-    const i = index - 1;
-
-    if (i < 0 || i >= s.messagePool.length) {
-      return interaction.reply({ content: "❌ Invalid index. Use **/poollist** to see numbers.", ephemeral: true });
-    }
-
-    const removed = s.messagePool.splice(i, 1)[0];
+    const i = interaction.options.getInteger("index") - 1;
+    if (i < 0 || i >= s.messagePool.length) return interaction.reply("❌ Invalid index");
+    s.messagePool.splice(i, 1);
     saveAllSoon();
-    return interaction.reply(`🗑 Removed from this server pool (#${index}):\n**${removed}**`);
+    return interaction.reply("🗑 Removed");
   }
 
   if (name === "poolclear") {
     s.messagePool = [];
     saveAllSoon();
-    return interaction.reply("🧹 Pool cleared for this server. Add new ones with **/pooladd**.");
+    return interaction.reply("🧹 Cleared");
   }
 
   if (name === "poollist") {
-    const maxSlots = getMaxSlotsForGuild(guildId);
-    const bonus = getBonusSlots(guildId);
-
-    const header =
-      `📦 **Server Message Pool**\n` +
-      `Slots: **${s.messagePool.length}/${maxSlots}** (base ${BASE_SLOTS} + bonus ${bonus})\n` +
-      `Enabled: **${s.enabled ? "yes" : "no"}**, Interval: **${s.interval}**`;
-
-    if (s.messagePool.length === 0) {
-      return interaction.reply(`${header}\n\n(Pool is empty) Fallback is:\n**${s.customMessage}**`);
-    }
-
-    const lines = s.messagePool.slice(0, 50).map((m, idx) => `${idx + 1}. ${m}`);
-    const extra = s.messagePool.length > 50 ? `\n…and ${s.messagePool.length - 50} more.` : "";
-    return interaction.reply(`${header}\n\n${lines.join("\n")}${extra}`);
+    const max = getMaxSlotsForGuild(guildId);
+    return interaction.reply(
+      `Slots ${s.messagePool.length}/${max}\n` +
+      (s.messagePool.length
+        ? s.messagePool.map((m, i) => `${i + 1}. ${m}`).join("\n")
+        : `Fallback: ${s.customMessage}`)
+    );
   }
 
-  // ---- Supporters (safe opt-in bonus slots) ----
-  // A user can only add support if they are in the support server.
-  // This avoids cross-server member scraping.
   if (name === "supportadd") {
     try {
-      const supportGuild = await client.guilds.fetch(SUPPORT_GUILD_ID);
-      await supportGuild.members.fetch(interaction.user.id); // throws if not a member
+      const g = await client.guilds.fetch(SUPPORT_GUILD_ID);
+      await g.members.fetch(interaction.user.id);
 
-      supportersByGuild[guildId] = supportersByGuild[guildId] || {};
+      supportersByGuild[guildId] ??= {};
       supportersByGuild[guildId][interaction.user.id] = true;
       saveAllSoon();
 
-      const maxSlots = getMaxSlotsForGuild(guildId);
-      return interaction.reply(`✅ You now support this server. New max slots: **${maxSlots}**`);
+      return interaction.reply(`✅ Supported. Max slots: ${getMaxSlotsForGuild(guildId)}`);
     } catch {
-      return interaction.reply({
-        content: `❌ To support a server, join the support server first: ${SUPPORT_INVITE}`,
-        ephemeral: true
-      });
+      return interaction.reply({ content: `❌ Join support server first: ${SUPPORT_INVITE}`, ephemeral: true });
     }
   }
 
   if (name === "supportremove") {
-    if (supportersByGuild[guildId]?.[interaction.user.id]) {
-      delete supportersByGuild[guildId][interaction.user.id];
-      if (Object.keys(supportersByGuild[guildId]).length === 0) delete supportersByGuild[guildId];
-      saveAllSoon();
-    }
-    const maxSlots = getMaxSlotsForGuild(guildId);
-    return interaction.reply(`✅ Support removed. New max slots: **${maxSlots}**`);
+    delete supportersByGuild[guildId]?.[interaction.user.id];
+    saveAllSoon();
+    return interaction.reply("✅ Support removed");
   }
 });
 
+/* ================= LOGIN ================= */
 client.login(TOKEN);
