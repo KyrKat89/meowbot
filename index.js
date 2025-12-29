@@ -294,7 +294,11 @@ client.on("interactionCreate", async i => {
 });
 
 /* ================= LOGIN ================= */
-client.login(TOKEN);
+client.login(TOKEN).catch(err => {
+  console.error("❌ Discord login failed:");
+  console.error(err);
+  process.exit(1);
+});
 
 /* ================= DUMMY HTTP SERVER (RENDER FREE) ================= */
 const PORT = process.env.PORT || 3000;
