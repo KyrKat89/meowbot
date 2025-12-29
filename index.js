@@ -11,13 +11,14 @@ const path = require("path");
 const http = require("http");
 
 /* ================= ENV ================= */
-const TOKEN = (process.env.DISCORD_TOKEN || "").trim(); // ✅ trim avoids hidden newline/space issues
+const TOKEN = (process.env.DISCORD_TOKEN || "").trim(); // ✅ trim removes hidden newline/space
 if (!TOKEN) {
   console.error("❌ DISCORD_TOKEN missing");
   process.exit(1);
 }
 
-const ENABLE_MESSAGE_CONTENT = (process.env.ENABLE_MESSAGE_CONTENT || "0") === "1";
+// Feature flags
+const ENABLE_MESSAGE_CONTENT = (process.env.ENABLE_MESSAGE_CONTENT || "0") === "1"; // keep OFF until stable
 const DEBUG_GATEWAY = (process.env.DEBUG_GATEWAY || "0") === "1";
 
 const OWNER_ID = "1164912728087986277";
@@ -35,7 +36,7 @@ http
     console.log(`🌐 HTTP server listening on port ${PORT}`);
   });
 
-console.log(`🔑 Token length: ${TOKEN.length}`);
+console.log("🔐 Token preview:", `${TOKEN.slice(0, 6)}...${TOKEN.slice(-6)}`, "len:", TOKEN.length);
 console.log(`🧩 MessageContent intent: ${ENABLE_MESSAGE_CONTENT ? "ON" : "OFF"}`);
 
 /* ================= Persistence files ================= */
@@ -52,11 +53,12 @@ function defaultGuildSettings() {
     counter: 0,
   };
 }
+
 const BASE_SLOTS = 5;
 
 /* ================= Stores ================= */
-const settingsByGuild = new Map();
-let supportersByGuild = {};
+const settingsByGuild = new Map(); // guildId -> settings
+let supportersByGuild = {}; // guildId -> { userId: true, ... }
 
 /* ================= Load/Save helpers ================= */
 function safeReadJSON(file, fallback) {
@@ -115,6 +117,7 @@ function getBonusSlots(guildId) {
   if (!supporters) return 0;
   return Object.keys(supporters).length;
 }
+
 function getMaxSlotsForGuild(guildId) {
   return BASE_SLOTS + getBonusSlots(guildId);
 }
@@ -129,7 +132,7 @@ function isStaff(interaction) {
   );
 }
 
-/* ================= Messaging helpers ================= */
+/* ================= Helpers ================= */
 function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
@@ -157,8 +160,9 @@ async function findSpeakableChannel(guild) {
           PermissionFlagsBits.ViewChannel,
           PermissionFlagsBits.SendMessages,
         ])
-      )
+      ) {
         return ch;
+      }
     } catch (_) {}
   }
   return null;
@@ -181,24 +185,39 @@ async function sendWelcomeMessage(guild) {
   }
 }
 
-/* ================= Discord client ================= */
-const intents = [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages];
+/* ================= Discord client (THIS IS THE “REPLACE CLIENT CREATION” PART) ================= */
+const intents = [
+  GatewayIntentBits.Guilds,
+  GatewayIntentBits.GuildMessages,
+  // Keep MessageContent OFF unless you enable it in Developer Portal and set ENABLE_MESSAGE_CONTENT=1
+];
+
 if (ENABLE_MESSAGE_CONTENT) intents.push(GatewayIntentBits.MessageContent);
 
-const client = new Client({ intents });
+const client = new Client({
+  intents,
+  rest: { timeout: 30_000 }, // helps on some hosts
+});
 
 /* ================= Gateway diagnostics ================= */
 client.on("warn", (m) => console.warn("⚠️ warn:", m));
 client.on("error", (e) => console.error("❌ client error:", e));
 client.on("shardError", (e) => console.error("❌ shardError:", e));
 client.on("shardDisconnect", (event, shardId) => {
-  console.error(`❌ shardDisconnect (shard ${shardId}) code=${event?.code} reason=${event?.reason}`);
+  console.error(
+    `❌ shardDisconnect shard=${shardId} code=${event?.code} reason=${event?.reason || "?"}`
+  );
 });
 client.on("shardReconnecting", (shardId) => console.log(`🔄 shardReconnecting ${shardId}`));
 client.on("invalidated", () => console.error("❌ session invalidated"));
 
 if (DEBUG_GATEWAY) {
-  client.on("debug", (m) => console.log("🧠 debug:", m));
+  client.on("debug", (m) => {
+    // keep logs readable
+    if (m.includes("Gateway") || m.includes("WS") || m.includes("shard")) {
+      console.log("🧠", m);
+    }
+  });
 }
 
 process.on("unhandledRejection", (err) => console.error("unhandledRejection:", err));
@@ -251,7 +270,7 @@ const commands = [
     .setDMPermission(false),
 ].map((c) => c.toJSON());
 
-/* ================= Ready ================= */
+/* ================= Ready + Register ================= */
 let readyFired = false;
 
 client.once("ready", async () => {
@@ -270,63 +289,56 @@ client.once("ready", async () => {
   }
 });
 
-/* ================= Watchdog (if login hangs) ================= */
+/* ================= Watchdog ================= */
 setTimeout(() => {
   if (!readyFired) {
-    console.error("❌ Ready did not fire within 45s (gateway issue). Exiting to restart.");
+    console.error("❌ Ready did not fire within 60s. Dumping state:");
+    console.error("   - Node:", process.version);
+    console.error("   - Guild cache size:", client.guilds.cache.size);
     process.exit(1);
   }
-}, 45_000);
+}, 60_000);
 
-/* ================= Guild join ================= */
+/* ================= When bot joins guild ================= */
 client.on("guildCreate", async (guild) => {
   getGuildSettings(guild.id);
   await sendWelcomeMessage(guild);
 });
 
-/* ================= Message handler ================= */
-let warnedNoContent = false;
-
+/* ================= Message auto counter ================= */
 client.on("messageCreate", async (msg) => {
   if (msg.author.bot) return;
+  if (!msg.guild) return;
 
-  // Owner broadcast (requires MessageContent to read msg.content reliably)
-  if (!ENABLE_MESSAGE_CONTENT) {
-    if (!warnedNoContent) {
-      warnedNoContent = true;
-      console.warn("⚠️ MessageContent intent OFF: owner broadcast command is disabled.");
-    }
-  } else {
-    if (
-      msg.author.id === OWNER_ID &&
-      msg.content.startsWith("..meowbot globalmessage ")
-    ) {
-      const text = msg.content.slice("..meowbot globalmessage ".length).trim();
-      if (!text) return;
+  // Owner broadcast needs message content
+  if (
+    ENABLE_MESSAGE_CONTENT &&
+    msg.author.id === OWNER_ID &&
+    msg.content.startsWith("..meowbot globalmessage ")
+  ) {
+    const text = msg.content.slice("..meowbot globalmessage ".length).trim();
+    if (!text) return;
 
-      let sent = 0;
-      let failed = 0;
+    let sent = 0;
+    let failed = 0;
 
-      for (const guild of client.guilds.cache.values()) {
-        try {
-          const ch = await findSpeakableChannel(guild);
-          if (ch) {
-            await ch.send(text);
-            sent++;
-            await new Promise((r) => setTimeout(r, 1800));
-          } else {
-            failed++;
-          }
-        } catch {
+    for (const guild of client.guilds.cache.values()) {
+      try {
+        const ch = await findSpeakableChannel(guild);
+        if (ch) {
+          await ch.send(text);
+          sent++;
+          await new Promise((r) => setTimeout(r, 1800));
+        } else {
           failed++;
         }
+      } catch {
+        failed++;
       }
-
-      return msg.reply(`✅ Broadcast done. Sent: **${sent}**, failed: **${failed}**`);
     }
-  }
 
-  if (!msg.guild) return;
+    return msg.reply(`✅ Broadcast done. Sent: **${sent}**, failed: **${failed}**`);
+  }
 
   const s = getGuildSettings(msg.guild.id);
   if (!s.enabled) return;
@@ -334,12 +346,14 @@ client.on("messageCreate", async (msg) => {
   s.counter++;
 
   if (s.counter >= s.interval) {
+    // atomic reset to avoid double-sends on bursts
     s.counter = 0;
     saveAllSoon();
 
     const canSend = msg.channel
       .permissionsFor(msg.guild.members.me)
       ?.has(PermissionFlagsBits.SendMessages);
+
     if (!canSend) return;
 
     const toSend =
@@ -354,7 +368,10 @@ client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   if (!interaction.guildId) {
-    return interaction.reply({ content: "Use commands in a server.", ephemeral: true });
+    return interaction.reply({
+      content: "Use commands in a server.",
+      ephemeral: true,
+    });
   }
 
   const guildId = interaction.guildId;
@@ -372,9 +389,13 @@ client.on("interactionCreate", async (interaction) => {
   ]);
 
   if (staffOnly.has(name) && !isStaff(interaction)) {
-    return interaction.reply({ content: "❌ Staff only.", ephemeral: true });
+    return interaction.reply({
+      content: "❌ Staff only.",
+      ephemeral: true,
+    });
   }
 
+  // Avoid “application didn’t respond”
   await interaction.deferReply();
 
   try {
@@ -459,7 +480,7 @@ client.on("interactionCreate", async (interaction) => {
     if (name === "supportadd") {
       try {
         const supportGuild = await client.guilds.fetch(SUPPORT_GUILD_ID);
-        await supportGuild.members.fetch(interaction.user.id);
+        await supportGuild.members.fetch(interaction.user.id); // throws if not member
 
         supportersByGuild[guildId] = supportersByGuild[guildId] || {};
         supportersByGuild[guildId][interaction.user.id] = true;
@@ -475,7 +496,9 @@ client.on("interactionCreate", async (interaction) => {
     if (name === "supportremove") {
       if (supportersByGuild[guildId]?.[interaction.user.id]) {
         delete supportersByGuild[guildId][interaction.user.id];
-        if (Object.keys(supportersByGuild[guildId]).length === 0) delete supportersByGuild[guildId];
+        if (Object.keys(supportersByGuild[guildId]).length === 0) {
+          delete supportersByGuild[guildId];
+        }
         saveAllSoon();
       }
       const maxSlots = getMaxSlotsForGuild(guildId);
